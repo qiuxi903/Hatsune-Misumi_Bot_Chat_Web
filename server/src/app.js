@@ -34,13 +34,22 @@ const PORT = process.env.PORT || 5000
 let CONNECTION_MODE = process.env.CONNECTION_MODE || 'http' // http 或 websocket
 
 // 中间件
+const corsOrigin = process.env.CORS_ORIGIN || '*'
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  origin: corsOrigin === '*' ? true : corsOrigin,
   credentials: true
 }))
 
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
+
+// 请求日志中间件
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    console.log(`[请求] ${req.method} ${req.path}`)
+  }
+  next()
+})
 
 // 静态文件服务
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')))
@@ -63,6 +72,17 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     connectionMode: CONNECTION_MODE,
     onebot: oneBotService.getConnectionStatus()
+  })
+})
+
+// API测试端点
+app.post('/api/test', (req, res) => {
+  console.log('[测试] 收到测试请求:', req.body)
+  res.json({
+    success: true,
+    message: 'API测试成功',
+    received: req.body,
+    timestamp: new Date().toISOString()
   })
 })
 
@@ -110,6 +130,73 @@ app.get('/api/onebot/status', (req, res) => {
     success: true,
     status: oneBotService.getConnectionStatus()
   })
+})
+
+// 获取OneBot健康状态
+app.get('/api/onebot/health', async (req, res) => {
+  const health = await oneBotService.checkConnectionHealth()
+  res.json({
+    success: true,
+    health
+  })
+})
+
+// OneBot v11 HTTP API 端点
+// aiocqhttp 可能使用 HTTP POST 来调用 API
+app.post('/api/onebot/:action', async (req, res) => {
+  const action = req.params.action
+  const params = req.body
+  const echo = params.echo || `http_${Date.now()}`
+
+  console.log(`[HTTP API] 收到API调用: ${action}`, JSON.stringify(params).substring(0, 200))
+
+  try {
+    // 处理API调用
+    const result = await oneBotService.handleHttpApiCall(action, params, echo)
+    res.json({
+      status: 'ok',
+      retcode: 0,
+      data: result,
+      echo
+    })
+  } catch (error) {
+    console.error(`[HTTP API] 处理失败:`, error.message)
+    res.json({
+      status: 'failed',
+      retcode: 100,
+      msg: error.message,
+      echo
+    })
+  }
+})
+
+// OneBot v11 标准 API 端点 (直接调用)
+app.post('/', async (req, res) => {
+  const { action, params, echo } = req.body
+
+  if (!action) {
+    return res.json({ status: 'failed', retcode: 100, msg: 'missing action' })
+  }
+
+  console.log(`[OneBot API] 收到API调用: ${action}`, echo ? `(echo: ${echo})` : '')
+
+  try {
+    const result = await oneBotService.handleHttpApiCall(action, params || {}, echo)
+    res.json({
+      status: 'ok',
+      retcode: 0,
+      data: result,
+      echo
+    })
+  } catch (error) {
+    console.error(`[OneBot API] 处理失败:`, error.message)
+    res.json({
+      status: 'failed',
+      retcode: 100,
+      msg: error.message,
+      echo
+    })
+  }
 })
 
 // Socket.IO连接处理

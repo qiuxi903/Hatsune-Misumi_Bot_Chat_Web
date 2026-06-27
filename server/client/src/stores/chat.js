@@ -102,9 +102,15 @@ export const useChatStore = defineStore('chat', () => {
 
   // 发送消息
   const sendMessage = async (content, options = {}) => {
+    console.log('[sendMessage] 开始发送消息:', content.substring(0, 50))
+
     if (!currentSession.value) {
+      console.log('[sendMessage] 没有当前会话，创建新会话')
       const sessionResult = await createSession()
-      if (!sessionResult.success) return sessionResult
+      if (!sessionResult.success) {
+        console.error('[sendMessage] 创建会话失败:', sessionResult.message)
+        return sessionResult
+      }
     }
 
     sending.value = true
@@ -131,7 +137,9 @@ export const useChatStore = defineStore('chat', () => {
     streamingMessage.value = aiMessage
 
     try {
-      console.log('发送消息请求:', content)
+      console.log('[sendMessage] 发送fetch请求到: /api/chat/send')
+      console.log('[sendMessage] sessionId:', currentSession.value?.id)
+
       const response = await fetch('/api/chat/send', {
         method: 'POST',
         headers: {
@@ -145,13 +153,15 @@ export const useChatStore = defineStore('chat', () => {
         })
       })
 
-      console.log('响应状态:', response.status, response.ok)
+      console.log('[sendMessage] 收到响应，状态:', response.status, response.ok)
 
       if (!response.ok) {
         const errorText = await response.text()
-        console.error('响应错误:', errorText)
+        console.error('[sendMessage] 响应错误:', errorText)
         throw new Error(`发送失败: ${response.status}`)
       }
+
+      console.log('[sendMessage] 响应成功，开始处理SSE流')
 
       // 处理SSE流式响应
       const reader = response.body.getReader()

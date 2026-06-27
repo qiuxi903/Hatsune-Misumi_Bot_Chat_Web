@@ -11,8 +11,10 @@ const __dirname = path.dirname(__filename)
 class OneBotService extends EventEmitter {
   constructor() {
     super()
-    this.ws = null
+    this.ws = null // Event连接（发送事件给AstrBot）
+    this.wsApi = null // API连接（接收AstrBot的API调用）
     this.isConnected = false
+    this.isApiConnected = false
     this.reconnectAttempts = 0
     this.maxReconnectAttempts = 5
     this.reconnectDelay = 5000
@@ -38,9 +40,180 @@ class OneBotService extends EventEmitter {
     this.on('api_call', (message) => this.handleApiCall(message))
   }
 
+  // 创建WebSocket连接选项
+  _createOptions(role, token) {
+    const options = {
+      headers: {
+        'User-Agent': 'HatsuneAIChat/1.0',
+        'X-Client-Role': role,
+        'X-Self-ID': '1712833352',
+        'X-Client-Platform': 'web_chat'
+      }
+    }
+    if (token) {
+      options.headers['Authorization'] = `Bearer ${token}`
+    }
+    return options
+  }
+
+  // 设置Event WebSocket连接的事件处理
+  _setupEventWs(ws, wsUrl, token) {
+    ws.on('open', () => {
+      console.log('[Event WebSocket] 连接成功')
+      this.isConnected = true
+      this.reconnectAttempts = 0
+      this.lastHeartbeat = Date.now()
+      this.emit('connected')
+
+      // 启动心跳检测
+      this.startHeartbeat()
+
+      // 发送队列中的消息
+      console.log(`[Event WebSocket] 发送队列中的 ${this.messageQueue.length} 条消息`)
+      while (this.messageQueue.length > 0) {
+        const message = this.messageQueue.shift()
+        this._sendRaw(message)
+      }
+    })
+
+    ws.on('pong', () => {
+      this.lastHeartbeat = Date.now()
+      console.log('[心跳] 收到pong')
+    })
+
+    ws.on('message', (data) => {
+      try {
+        const rawStr = data.toString()
+        // 只记录非心跳消息
+        if (!rawStr.includes('"meta_event_type":"heartbeat"')) {
+          console.log('[Event WS] 收到消息:', rawStr.substring(0, 300))
+        }
+        const message = JSON.parse(rawStr)
+        // Event连接不应该处理API调用
+        if (message.action) {
+          console.log(`[Event WS] 忽略API调用（应通过API连接）: ${message.action}`)
+          return
+        }
+        this.handleMessage(message)
+      } catch (error) {
+        console.error('[Event WS] 解析消息失败:', error)
+      }
+    })
+
+    ws.on('close', (code, reason) => {
+      console.log(`[Event WebSocket] 连接已关闭: code=${code}`)
+      this.isConnected = false
+      this.stopHeartbeat()
+      this.emit('disconnected', { code, reason })
+
+      // 清理待处理消息
+      for (const [userId, pending] of this.pendingWebMessages) {
+        clearTimeout(pending.timer)
+        pending.reject(new Error('WebSocket连接已断开'))
+      }
+      this.pendingWebMessages.clear()
+
+      // 自动重连
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        this.reconnectAttempts++
+        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1)
+        console.log(`[Event WebSocket] 尝试重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})，${delay}ms后...`)
+        setTimeout(() => this.connect(wsUrl, token), delay)
+      } else {
+        console.log('[Event WebSocket] 达到最大重连次数')
+        this.emit('reconnect_failed')
+      }
+    })
+
+    ws.on('error', (error) => {
+      console.error('[Event WebSocket] 错误:', error.message)
+      this.emit('error', error)
+    })
+  }
+
+  // 设置API WebSocket连接的事件处理
+  _setupApiWs(ws, wsUrl, token) {
+    ws.on('open', () => {
+      console.log('[API WebSocket] 连接成功 - 可接收AstrBot API调用')
+      this.isApiConnected = true
+    })
+
+    ws.on('pong', () => {
+      // API连接心跳
+    })
+
+    ws.on('message', (data) => {
+      try {
+        const rawStr = data.toString()
+        console.log('[API WS] 收到消息:', rawStr.substring(0, 500))
+        const message = JSON.parse(rawStr)
+
+        // 处理API调用
+        if (message.action) {
+          console.log(`[API WS] 收到API调用: ${message.action}`)
+          this.emit('api_call', message)
+          return
+        }
+
+        // 处理响应
+        if (message.echo !== undefined) {
+          const pending = this.pendingRequests.get(message.echo)
+          if (pending) {
+            this.pendingRequests.delete(message.echo)
+            if (message.status === 'ok') {
+              pending.resolve(message.data)
+            } else {
+              pending.reject(new Error(message.message || '请求失败'))
+            }
+          }
+          return
+        }
+
+        // 其他消息
+        this.handleMessage(message)
+      } catch (error) {
+        console.error('[API WS] 解析消息失败:', error)
+      }
+    })
+
+    ws.on('close', (code, reason) => {
+      console.log(`[API WebSocket] 连接已关闭: code=${code}`)
+      this.isApiConnected = false
+
+      // 自动重连API连接
+      if (this._url) {
+        const delay = 3000
+        console.log(`[API WebSocket] ${delay}ms后重连...`)
+        setTimeout(() => this._connectApi(this._url, this._token), delay)
+      }
+    })
+
+    ws.on('error', (error) => {
+      console.error('[API WebSocket] 错误:', error.message)
+    })
+  }
+
+  // 建立API连接
+  _connectApi(url, token) {
+    if (this.wsApi) {
+      try { this.wsApi.close() } catch (e) {}
+    }
+
+    let wsUrl = url
+    if (!wsUrl.endsWith('/ws')) {
+      wsUrl = wsUrl.replace(/\/$/, '') + '/ws'
+    }
+
+    console.log(`[API WebSocket] 正在连接: ${wsUrl}`)
+    const options = this._createOptions('API', token)
+    this.wsApi = new WebSocket(wsUrl, options)
+    this._setupApiWs(this.wsApi, url, token)
+  }
+
   // 连接到OneBot v11服务
   connect(url, token = null) {
     if (this.ws) {
+      console.log('[connect] 断开现有Event连接')
       this.disconnect()
     }
 
@@ -53,100 +226,44 @@ class OneBotService extends EventEmitter {
       wsUrl = wsUrl.replace(/\/$/, '') + '/ws'
     }
 
-    console.log(`正在连接OneBot v11服务: ${wsUrl}`)
+    console.log(`[connect] 正在建立双WebSocket连接: ${wsUrl}`)
 
-    const options = {
-      headers: {
-        'User-Agent': 'HatsuneAIChat/1.0',
-        'X-Client-Role': 'Universal',
-        'X-Self-ID': '100001',
-        'X-Client-Platform': 'web_chat'
-      }
-    }
-    if (token) {
-      options.headers['Authorization'] = `Bearer ${token}`
-    }
+    // 1. 建立Event连接（发送事件给AstrBot）
+    const eventOptions = this._createOptions('Event', token)
+    this.ws = new WebSocket(wsUrl, eventOptions)
+    this._setupEventWs(this.ws, url, token)
 
-    this.ws = new WebSocket(wsUrl, options)
-
-    this.ws.on('open', () => {
-      console.log('OneBot v11服务连接成功')
-      this.isConnected = true
-      this.reconnectAttempts = 0
-      this.lastHeartbeat = Date.now()
-      this.emit('connected')
-
-      // 启动心跳检测
-      this.startHeartbeat()
-
-      // 发送队列中的消息
-      while (this.messageQueue.length > 0) {
-        const message = this.messageQueue.shift()
-        this._sendRaw(message)
-      }
-    })
-
-    this.ws.on('pong', () => {
-      this.lastHeartbeat = Date.now()
-      console.log('收到心跳pong')
-    })
-
-    this.ws.on('message', (data) => {
-      try {
-        const message = JSON.parse(data.toString())
-        this.handleMessage(message)
-      } catch (error) {
-        console.error('解析OneBot消息失败:', error)
-      }
-    })
-
-    this.ws.on('close', (code, reason) => {
-      console.log(`OneBot v11连接已关闭: ${code} - ${reason}`)
-      this.isConnected = false
-      this.stopHeartbeat()
-      this.emit('disconnected', { code, reason })
-
-      // 自动重连（指数退避）
-      if (this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts++
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1)
-        console.log(`尝试重新连接 (${this.reconnectAttempts}/${this.maxReconnectAttempts})，${delay}ms后...`)
-        setTimeout(() => this.connect(url, token), delay)
-      } else {
-        console.log('达到最大重连次数，停止重连')
-        this.emit('reconnect_failed')
-      }
-    })
-
-    this.ws.on('error', (error) => {
-      console.error('OneBot v11连接错误:', error.message)
-      if (error.message.includes('400')) {
-        console.error('提示: 返回400错误，可能原因:')
-        console.error('1. AstrBot端未配置OneBot v11适配器')
-        console.error('2. 端口或路径不正确')
-        console.error('3. 需要检查AstrBot WebUI中的机器人配置')
-      }
-      this.emit('error', error)
-    })
+    // 2. 建立API连接（接收AstrBot的API调用）
+    setTimeout(() => {
+      this._connectApi(url, token)
+    }, 1000) // 延迟1秒，确保Event连接先建立
   }
 
   // 启动心跳检测
   startHeartbeat() {
     this.stopHeartbeat()
-    
+
     this.heartbeatInterval = setInterval(() => {
       if (this.isConnected && this.ws) {
+        // 检查WebSocket状态
+        if (this.ws.readyState !== WebSocket.OPEN) {
+          console.log(`[心跳] WebSocket状态异常: ${this.ws.readyState}，尝试重新连接...`)
+          this.reconnect()
+          return
+        }
+
         // 发送心跳ping
         try {
           this.ws.ping()
-          console.log('发送心跳ping')
+          console.log('[心跳] 发送ping')
         } catch (error) {
-          console.error('发送心跳失败:', error.message)
+          console.error('[心跳] 发送失败:', error.message)
+          this.reconnect()
         }
-        
+
         // 检查是否超时
         if (this.lastHeartbeat && Date.now() - this.lastHeartbeat > this.heartbeatTimeout * 2) {
-          console.log('心跳超时，重新连接...')
+          console.log('[心跳] 超时，重新连接...')
           this.reconnect()
         }
       }
@@ -168,22 +285,55 @@ class OneBotService extends EventEmitter {
   // 重新连接
   reconnect() {
     if (this._url) {
+      console.log('[reconnect] 开始重新连接...')
       this.disconnect()
       this.connect(this._url, this._token)
+    } else {
+      console.log('[reconnect] 无法重连：没有保存的URL')
     }
+  }
+
+  // 主动检查连接健康状态
+  async checkConnectionHealth() {
+    if (!this.isConnected || !this.ws) {
+      return { healthy: false, reason: '未连接' }
+    }
+
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      return { healthy: false, reason: `WebSocket状态异常: ${this.ws.readyState}` }
+    }
+
+    // 检查最后一次心跳时间
+    const now = Date.now()
+    if (this.lastHeartbeat && now - this.lastHeartbeat > this.heartbeatTimeout * 3) {
+      return { healthy: false, reason: `心跳超时: ${(now - this.lastHeartbeat) / 1000}秒未收到pong` }
+    }
+
+    return { healthy: true, lastHeartbeat: this.lastHeartbeat }
   }
 
   // 断开连接
   disconnect() {
+    console.log('[disconnect] 断开OneBot连接')
     this.stopHeartbeat()
-    
+
     if (this.ws) {
       this.ws.close()
       this.ws = null
       this.isConnected = false
     }
 
+    if (this.wsApi) {
+      this.wsApi.close()
+      this.wsApi = null
+      this.isApiConnected = false
+    }
+
     // 清理所有待处理的Web消息
+    const pendingCount = this.pendingWebMessages.size
+    if (pendingCount > 0) {
+      console.log(`[disconnect] 清理 ${pendingCount} 个待处理的Web消息`)
+    }
     for (const [userId, pending] of this.pendingWebMessages) {
       clearTimeout(pending.timer)
       pending.reject(new Error('连接已断开'))
@@ -191,18 +341,52 @@ class OneBotService extends EventEmitter {
     this.pendingWebMessages.clear()
   }
 
-  // 发送消息（内部方法）
+  // 通过API连接发送消息（用于echo响应）
+  _sendApiRaw(message) {
+    if (!this.wsApi || this.wsApi.readyState !== WebSocket.OPEN) {
+      console.log(`[_sendApiRaw] API WebSocket未就绪，尝试通过Event连接发送`)
+      return this._sendRaw(message)
+    }
+
+    try {
+      const msgStr = JSON.stringify(message)
+      console.log(`[_sendApiRaw] 通过API连接发送: ${msgStr.substring(0, 200)}`)
+      this.wsApi.send(msgStr)
+      return true
+    } catch (error) {
+      console.error('[_sendApiRaw] 发送失败:', error)
+      return this._sendRaw(message)
+    }
+  }
+
+  // 发送消息（内部方法，通过Event连接）
   _sendRaw(message) {
+    // 检查连接状态
     if (!this.isConnected || !this.ws) {
+      console.log(`[_sendRaw] WebSocket未连接，消息加入队列。isConnected: ${this.isConnected}, ws: ${!!this.ws}`)
+      this.messageQueue.push(message)
+      return false
+    }
+
+    // 检查WebSocket就绪状态
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      console.log(`[_sendRaw] WebSocket状态不是OPEN: ${this.ws.readyState}，消息加入队列`)
       this.messageQueue.push(message)
       return false
     }
 
     try {
-      this.ws.send(JSON.stringify(message))
+      const msgStr = JSON.stringify(message)
+      // 只记录API调用响应和重要消息，不记录心跳
+      if (message.action || message.echo || message.post_type === 'message') {
+        console.log(`[_sendRaw] 发送消息: ${msgStr.substring(0, 200)}`)
+      }
+      this.ws.send(msgStr)
       return true
     } catch (error) {
-      console.error('发送OneBot消息失败:', error)
+      console.error('[_sendRaw] 发送OneBot消息失败:', error)
+      // 发送失败时尝试重连
+      this.reconnect()
       return false
     }
   }
@@ -289,14 +473,15 @@ class OneBotService extends EventEmitter {
 
   // 处理接收到的消息
   handleMessage(message) {
-    // 调试日志
+    // 调试日志 - 记录所有非meta_event消息
     if (message.post_type !== 'meta_event') {
-      console.log('收到OneBot消息:', JSON.stringify(message).substring(0, 200))
+      console.log('收到OneBot消息:', JSON.stringify(message).substring(0, 300))
     }
 
     // 处理API调用来自AstrBot（如send_msg, send_private_msg）
     // OneBot v11协议中，实现端可以向客户端发送API调用
     if (message.action) {
+      console.log(`[API调用] 收到AstrBot API请求: ${message.action}`, message.echo ? `(echo: ${message.echo})` : '')
       this.emit('api_call', message)
       return
     }
@@ -351,13 +536,16 @@ class OneBotService extends EventEmitter {
   async handleApiCall(message) {
     const { action, params, echo } = message
 
-    console.log(`收到AstrBot API调用: ${action}`, params ? JSON.stringify(params).substring(0, 200) : '')
+    console.log(`[handleApiCall] 处理API调用: ${action}`, echo ? `(echo: ${echo})` : '')
+    if (params) {
+      console.log(`[handleApiCall] 参数:`, JSON.stringify(params).substring(0, 300))
+    }
 
     // === 查询API处理（返回模拟QQ数据，不推入pending消息）===
     const queryResult = this._handleQueryApi(action, params)
     if (queryResult !== undefined) {
       if (echo) {
-        this._sendRaw({ status: 'ok', retcode: 0, data: queryResult, echo })
+        this._sendApiRaw({ status: 'ok', retcode: 0, data: queryResult, echo })
       }
       return
     }
@@ -366,6 +554,7 @@ class OneBotService extends EventEmitter {
 
     // 处理send_msg和send_private_msg调用（AstrBot要发送消息给用户）
     if (action === 'send_msg' || action === 'send_private_msg') {
+      console.log(`[send_private_msg] 开始处理发送消息请求`)
       // 统一转为数字类型，确保与Map的key类型一致
       let userId = params.user_id !== undefined ? Number(params.user_id) : null
       let responseContent = ''
@@ -384,18 +573,18 @@ class OneBotService extends EventEmitter {
         // 找到最近创建的待处理消息
         entries.sort((a, b) => (b[1].sentAt || 0) - (a[1].sentAt || 0))
         userId = entries[0][0]
-        console.log(`send_private_msg未指定user_id，使用最近的待处理用户: ${userId}`)
+        console.log(`[send_private_msg] 未指定user_id，使用最近的待处理用户: ${userId}`)
       }
 
-      console.log(`AstrBot发送消息给用户 ${userId}: ${responseContent.substring(0, 200)}`)
-      console.log(`消息类型: ${typeof params.message}, 是否数组: ${Array.isArray(params.message)}`)
+      console.log(`[send_private_msg] AstrBot发送消息给用户 ${userId}: ${responseContent.substring(0, 200)}`)
+      console.log(`[send_private_msg] 消息类型: ${typeof params.message}, 是否数组: ${Array.isArray(params.message)}`)
       if (Array.isArray(params.message)) {
-        console.log(`消息段: ${JSON.stringify(params.message.map(s => ({type: s.type, hasData: !!s.data})))}`)
+        console.log(`[send_private_msg] 消息段: ${JSON.stringify(params.message.map(s => ({type: s.type, hasData: !!s.data})))}`)
       }
 
       // 查找对应的待处理Web消息
       const pending = userId ? this.pendingWebMessages.get(userId) : null
-      console.log(`查找pending消息: userId=${userId}(类型:${typeof userId}), pendingWebMessages.size=${this.pendingWebMessages.size}, found=${!!pending}, keys=[${[...this.pendingWebMessages.keys()].join(',')}]`)
+      console.log(`[send_private_msg] 查找pending消息: userId=${userId}(类型:${typeof userId}), pendingWebMessages.size=${this.pendingWebMessages.size}, found=${!!pending}, keys=[${[...this.pendingWebMessages.keys()].join(',')}]`)
 
       if (pending) {
         // 过滤掉AstrBot插件的错误消息
@@ -406,17 +595,18 @@ class OneBotService extends EventEmitter {
           responseContent.includes("TypeError:") ||
           responseContent.includes("在调用插件") && responseContent.includes("时出现异常")
         )) {
-          console.log(`过滤掉AstrBot插件错误消息: ${responseContent.substring(0, 80)}`)
+          console.log(`[send_private_msg] 过滤掉AstrBot插件错误消息: ${responseContent.substring(0, 80)}`)
           // 仍然回复echo，但不推入pending消息
           if (echo) {
-            this._sendRaw({ status: 'ok', retcode: 0, data: null, echo })
+            this._sendApiRaw({ status: 'ok', retcode: 0, data: null, echo })
           }
           return
         }
 
         // 收集响应消息（可能有多条）
         pending.messages.push(responseContent)
-        console.log(`已推送消息到pending，当前共 ${pending.messages.length} 条消息`)
+        console.log(`[send_private_msg] 已推送消息到pending，当前共 ${pending.messages.length} 条消息`)
+        console.log(`[send_private_msg] 消息内容预览: ${responseContent.substring(0, 100)}`)
 
         // 立即通过回调通知前端（流式输出）
         if (pending.onMessage) {
@@ -432,33 +622,39 @@ class OneBotService extends EventEmitter {
         const elapsed = Date.now() - (pending.sentAt || Date.now())
         const remaining = Math.max(3000 - elapsed, 500) // 至少等500ms，最多等到3秒
 
+        console.log(`[send_private_msg] 重置收集定时器, userId=${userId}, 已过${elapsed}ms, 等待${remaining}ms`)
+
         pending.timer = setTimeout(() => {
-          console.log(`收集定时器触发，userId=${userId}，共 ${pending.messages.length} 条消息`)
+          console.log(`[send_private_msg] 收集定时器触发，userId=${userId}，共 ${pending.messages.length} 条消息`)
           if (this.pendingWebMessages.has(userId)) {
             this.pendingWebMessages.delete(userId)
             // 返回消息数组，支持多条消息分开显示
             const messages = [...pending.messages]
-            console.log(`Web用户 ${userId} 收到所有响应，共 ${messages.length} 条消息`)
+            console.log(`[send_private_msg] Web用户 ${userId} 收到所有响应，共 ${messages.length} 条消息`)
             pending.resolve(messages)
           }
         }, remaining)
       } else {
-        console.log(`未找到pending消息: userId=${userId}`)
+        console.log(`[send_private_msg] 未找到pending消息: userId=${userId}`)
+        console.log(`[send_private_msg] 当前pending用户: [${[...this.pendingWebMessages.keys()].join(',')}]`)
       }
 
       // 发送成功响应给AstrBot（必须回复，否则AstrBot会认为调用失败）
       if (echo) {
-        this._sendRaw({ status: 'ok', retcode: 0, data: null, echo })
+        console.log(`[send_private_msg] 发送成功响应给AstrBot, echo: ${echo}`)
+        this._sendApiRaw({ status: 'ok', retcode: 0, data: null, echo })
+      } else {
+        console.log(`[send_private_msg] 警告: 没有echo字段，无法发送响应`)
       }
     } else if (action === 'send_group_msg') {
       // 群消息响应（暂不处理，但需要回复echo）
       if (echo) {
-        this._sendRaw({ status: 'ok', retcode: 0, data: null, echo })
+        this._sendApiRaw({ status: 'ok', retcode: 0, data: null, echo })
       }
     } else if (action === 'friend_poke') {
       // 处理戳一戳动作
       const userId = params.user_id
-      console.log(`AstrBot发送戳一戳给用户 ${userId}`)
+      console.log(`[friend_poke] AstrBot发送戳一戳给用户 ${userId}`)
 
       // 查找对应的待处理Web消息
       const pending = this.pendingWebMessages.get(userId)
@@ -466,7 +662,7 @@ class OneBotService extends EventEmitter {
         // 只记录戳一戳消息，不立即resolve
         // 等待正式的send_private_msg来resolve
         pending.messages.push('[戳一戳]')
-        console.log(`已记录戳一戳消息到pending，当前共 ${pending.messages.length} 条消息`)
+        console.log(`[friend_poke] 已记录戳一戳消息到pending，当前共 ${pending.messages.length} 条消息`)
 
         // 重置定时器，等待更长时间（30秒）让正式消息到达
         clearTimeout(pending.timer)
@@ -474,21 +670,24 @@ class OneBotService extends EventEmitter {
           if (this.pendingWebMessages.has(userId)) {
             this.pendingWebMessages.delete(userId)
             const messages = [...pending.messages]
-            console.log(`戳一戳定时器触发，Web用户 ${userId} 收到所有响应，共 ${messages.length} 条消息`)
+            console.log(`[friend_poke] 戳一戳定时器触发，Web用户 ${userId} 收到所有响应，共 ${messages.length} 条消息`)
             pending.resolve(messages)
           }
         }, 30000) // 30秒超时，等待正式消息
+      } else {
+        console.log(`[friend_poke] 未找到用户 ${userId} 的pending消息`)
       }
 
       // 发送成功响应给AstrBot
       if (echo) {
-        this._sendRaw({ status: 'ok', retcode: 0, data: null, echo })
+        console.log(`[friend_poke] 发送成功响应给AstrBot, echo: ${echo}`)
+        this._sendApiRaw({ status: 'ok', retcode: 0, data: null, echo })
       }
     } else {
       // 未知的响应类API调用 - 回复成功但不推入pending消息
       console.log(`未处理的API调用: ${action}`)
       if (echo) {
-        this._sendRaw({ status: 'ok', retcode: 0, data: null, echo })
+        this._sendApiRaw({ status: 'ok', retcode: 0, data: null, echo })
       }
     }
   }
@@ -902,15 +1101,23 @@ class OneBotService extends EventEmitter {
 
     // 尝试通过WebSocket发送消息
     let wsSent = false
-    if (this.isConnected) {
+    if (this.isConnectionReady()) {
       wsSent = this._sendRaw(messageEvent)
       if (wsSent) {
-        console.log('消息已通过WebSocket发送')
+        console.log('[sendWebMessage] 消息已通过WebSocket发送')
       } else {
-        console.log('WebSocket发送失败，将使用HTTP API')
+        console.log('[sendWebMessage] WebSocket发送失败')
       }
     } else {
-      console.log('WebSocket未连接，将使用HTTP API')
+      console.log('[sendWebMessage] WebSocket未就绪，状态:', {
+        isConnected: this.isConnected,
+        wsReadyState: this.ws ? this.ws.readyState : null
+      })
+      // 尝试重连
+      if (!this.isConnected) {
+        console.log('[sendWebMessage] 尝试重新连接...')
+        this.reconnect()
+      }
     }
 
     // 如果WebSocket发送失败，抛出错误
@@ -924,6 +1131,7 @@ class OneBotService extends EventEmitter {
       const timeout = setTimeout(() => {
         if (this.pendingWebMessages.has(userId)) {
           this.pendingWebMessages.delete(userId)
+          console.log(`[sendWebMessage] 响应超时, userId=${userId}, wsSent=${wsSent}`)
           // 区分"消息已发送但响应超时"和"消息发送失败"
           if (wsSent) {
             reject(new Error('消息已发送，但AstrBot响应超时（120秒）'))
@@ -937,10 +1145,12 @@ class OneBotService extends EventEmitter {
       this.pendingWebMessages.set(userId, {
         resolve: (data) => {
           clearTimeout(timeout)
+          console.log(`[sendWebMessage] 收到响应, userId=${userId}, 消息数=${Array.isArray(data) ? data.length : 1}`)
           resolve(data)
         },
         reject: (error) => {
           clearTimeout(timeout)
+          console.log(`[sendWebMessage] 请求失败, userId=${userId}: ${error.message}`)
           reject(error)
         },
         onMessage: onMessage, // 流式回调
@@ -949,6 +1159,7 @@ class OneBotService extends EventEmitter {
         username,
         sentAt: Date.now()
       })
+      console.log(`[sendWebMessage] 已注册pending消息, userId=${userId}, 当前pending数=${this.pendingWebMessages.size}`)
 
       // 如果WebSocket发送失败，我们需要通过HTTP API发送消息
       // 但HTTP API发送后，响应会通过WebSocket返回（如果连接的话）
@@ -1166,14 +1377,117 @@ class OneBotService extends EventEmitter {
   getConnectionStatus() {
     return {
       connected: this.isConnected,
+      apiConnected: this.isApiConnected,
       reconnectAttempts: this.reconnectAttempts,
       maxReconnectAttempts: this.maxReconnectAttempts,
       pendingWebMessages: this.pendingWebMessages.size,
       lastHeartbeat: this.lastHeartbeat,
       heartbeatActive: !!this.heartbeatInterval,
-      httpApiConfigured: !!this.httpApiUrl,
-      wsReadyState: this.ws ? this.ws.readyState : null
+      wsReadyState: this.ws ? this.ws.readyState : null,
+      wsApiReadyState: this.wsApi ? this.wsApi.readyState : null
     }
+  }
+
+  // 检查连接是否真正可用
+  isConnectionReady() {
+    return this.isConnected &&
+           this.ws &&
+           this.ws.readyState === WebSocket.OPEN
+  }
+
+  // 处理HTTP API调用
+  async handleHttpApiCall(action, params, echo) {
+    console.log(`[handleHttpApiCall] 处理HTTP API调用: ${action}`)
+
+    // 查询API处理
+    const queryResult = this._handleQueryApi(action, params)
+    if (queryResult !== undefined) {
+      return queryResult
+    }
+
+    // 处理send_msg和send_private_msg
+    if (action === 'send_msg' || action === 'send_private_msg') {
+      let userId = params.user_id !== undefined ? Number(params.user_id) : null
+      let responseContent = ''
+
+      // 提取消息内容
+      if (typeof params.message === 'string') {
+        responseContent = params.message
+      } else if (Array.isArray(params.message)) {
+        responseContent = await this.extractMessageText(params.message)
+      }
+
+      // 如果没有user_id，尝试找到最近的待处理消息
+      if (!userId && this.pendingWebMessages.size > 0) {
+        const entries = [...this.pendingWebMessages.entries()]
+        entries.sort((a, b) => (b[1].sentAt || 0) - (a[1].sentAt || 0))
+        userId = entries[0][0]
+      }
+
+      console.log(`[HTTP send_private_msg] 用户 ${userId}: ${responseContent.substring(0, 100)}`)
+
+      // 查找对应的待处理Web消息
+      const pending = userId ? this.pendingWebMessages.get(userId) : null
+
+      if (pending) {
+        // 收集响应消息
+        pending.messages.push(responseContent)
+        console.log(`[HTTP send_private_msg] 已推送消息到pending，当前共 ${pending.messages.length} 条消息`)
+
+        // 立即通过回调通知前端
+        if (pending.onMessage) {
+          pending.onMessage({
+            content: responseContent,
+            messageIndex: pending.messages.length - 1,
+            totalMessages: pending.messages.length
+          })
+        }
+
+        // 智能消息收集
+        clearTimeout(pending.timer)
+        const elapsed = Date.now() - (pending.sentAt || Date.now())
+        const remaining = Math.max(3000 - elapsed, 500)
+
+        pending.timer = setTimeout(() => {
+          if (this.pendingWebMessages.has(userId)) {
+            this.pendingWebMessages.delete(userId)
+            const messages = [...pending.messages]
+            console.log(`[HTTP send_private_msg] 收集完成，共 ${messages.length} 条消息`)
+            pending.resolve(messages)
+          }
+        }, remaining)
+      } else {
+        console.log(`[HTTP send_private_msg] 未找到pending消息: userId=${userId}`)
+      }
+
+      return null
+    }
+
+    // 处理friend_poke
+    if (action === 'friend_poke') {
+      const userId = params.user_id
+      console.log(`[HTTP friend_poke] 用户 ${userId}`)
+
+      const pending = this.pendingWebMessages.get(userId)
+      if (pending) {
+        pending.messages.push('[戳一戳]')
+
+        clearTimeout(pending.timer)
+        pending.timer = setTimeout(() => {
+          if (this.pendingWebMessages.has(userId)) {
+            this.pendingWebMessages.delete(userId)
+            const messages = [...pending.messages]
+            pending.resolve(messages)
+          }
+        }, 30000)
+      }
+
+      return null
+    }
+
+    // 未知API
+    console.log(`[handleHttpApiCall] 未知API: ${action}`)
+    return null
   }
 }
 

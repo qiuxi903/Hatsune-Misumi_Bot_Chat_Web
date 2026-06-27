@@ -206,7 +206,7 @@
 
           <!-- 普通消息 -->
           <div
-            v-else
+            v-else-if="!isVoiceMessage(message.content)"
             class="message-wrapper"
             :class="[message.role, { 'poke-shake': isPokeMessage(message.content) }]"
           >
@@ -476,6 +476,11 @@ const isPokeMessage = (content) => {
   return content && content.trim() === '[戳一戳]'
 }
 
+// 检测语音消息（完全屏蔽）
+const isVoiceMessage = (content) => {
+  return content && (content.trim() === '[语音消息]' || content.trim().startsWith('[语音消息]'))
+}
+
 const copyMessage = async (content) => {
   try {
     await navigator.clipboard.writeText(content)
@@ -498,39 +503,59 @@ const renderMarkdown = (text) => {
     return ''
   }
 
+  // 完全屏蔽语音消息
+  if (text.trim() === '[语音消息]' || text.trim().startsWith('[语音消息]')) {
+    return ''
+  }
+
   // 调试日志
   if (text.includes('图片') || text.includes('![')) {
     console.log('renderMarkdown输入:', text.substring(0, 200))
   }
 
   // 音乐卡片检测和渲染（🎵 开头 + URL）
-  const musicMatch = text.match(/^🎵\s*(.+?)(?:\s*-\s*(.+?))?\n(https?:\/\/\S+)/ms)
+  const musicMatch = text.match(/🎵\s*(.+?)(?:\s*-\s*(.+?))\n(https?:\/\/\S+)/ms)
   if (musicMatch) {
     const title = musicMatch[1]?.trim() || '未知歌曲'
     const artist = musicMatch[2]?.trim() || ''
     const url = musicMatch[3]?.trim() || ''
-    return `<div class="music-card">
-      <div class="music-card-icon">🎵</div>
-      <div class="music-card-info">
-        <div class="music-card-title">${escapeHtml(title)}</div>
-        ${artist ? `<div class="music-card-artist">${escapeHtml(artist)}</div>` : ''}
-      </div>
-      ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="music-card-play">▶ 播放</a>` : ''}
-    </div>`
+    // 提取音乐链接之前的文本
+    const beforeText = text.substring(0, musicMatch.index).trim()
+    // 提取音乐链接之后的文本
+    const afterText = text.substring(musicMatch.index + musicMatch[0].length).trim()
+    let result = ''
+    if (beforeText) {
+      result += `${escapeHtml(beforeText)}<br>`
+    }
+    result += `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="music-link">🎵 ${escapeHtml(title)} - ${escapeHtml(artist || '未知歌手')}</a><br><a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="music-url">${escapeHtml(url)}</a>`
+    if (afterText) {
+      result += `<br>${escapeHtml(afterText)}`
+    }
+    return result
   }
 
   // 链接分享检测（🔗 开头 + URL）
-  const linkMatch = text.match(/^🔗\s*(.+?)\n(https?:\/\/\S+)/ms)
+  const linkMatch = text.match(/🔗\s*(.+?)\n(https?:\/\/\S+)/ms)
   if (linkMatch) {
     const title = linkMatch[1]?.trim() || '链接'
     const url = linkMatch[2]?.trim() || ''
-    return `<div class="link-card">
+    const beforeText = text.substring(0, linkMatch.index).trim()
+    const afterText = text.substring(linkMatch.index + linkMatch[0].length).trim()
+    let result = ''
+    if (beforeText) {
+      result += `<div class="message-text-line">${escapeHtml(beforeText)}</div>`
+    }
+    result += `<a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="link-card">
       <div class="link-card-icon">🔗</div>
       <div class="link-card-info">
         <div class="link-card-title">${escapeHtml(title)}</div>
-        <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="link-card-url">${escapeHtml(url)}</a>
+        <div class="link-card-url">${escapeHtml(url)}</div>
       </div>
-    </div>`
+    </a>`
+    if (afterText) {
+      result += `<div class="message-text-line">${escapeHtml(afterText)}</div>`
+    }
+    return result
   }
 
   // 合并转发检测
@@ -1247,6 +1272,7 @@ onUnmounted(() => {
 .message-wrapper.user {
   align-self: flex-end;
   flex-direction: row-reverse;
+  align-items: flex-end;
 }
 
 .message-wrapper.assistant {
@@ -1395,6 +1421,92 @@ onUnmounted(() => {
 @keyframes typing {
   0%, 100% { transform: scale(1); opacity: 0.4; }
   50% { transform: scale(1.2); opacity: 0.8; }
+}
+
+/* 音乐链接样式 */
+.music-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 0.2em;
+  transition: opacity 0.2s;
+}
+
+.music-link:hover {
+  opacity: 0.8;
+}
+
+.music-url {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.5);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.music-url:hover {
+  text-decoration: underline;
+}
+
+/* 消息文本行 */
+.message-text-line {
+  margin: 0.25rem 0;
+}
+
+/* 链接卡片 */
+.link-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem;
+  margin: 0.5rem 0;
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 0.5rem;
+  text-decoration: none;
+  color: inherit;
+  transition: background 0.2s;
+  cursor: pointer;
+  max-width: 300px;
+}
+
+.link-card:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.link-card-icon {
+  width: 36px;
+  height: 36px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 0.375rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.125rem;
+  flex-shrink: 0;
+}
+
+.link-card-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.link-card-title {
+  font-weight: 500;
+  font-size: 0.8125rem;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.link-card-url {
+  font-size: 0.6875rem;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 加载状态 */

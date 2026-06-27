@@ -380,6 +380,7 @@ router.post('/send', authenticate, async (req, res) => {
     console.log('本地会话ID:', session.id)
     console.log('消息内容:', content)
     console.log('OneBot连接状态:', oneBotService.isConnected)
+    console.log('OneBot连接详情:', oneBotService.getConnectionStatus())
 
     let aiReply = ''
     let usedMethod = ''
@@ -387,7 +388,7 @@ router.post('/send', authenticate, async (req, res) => {
 
     try {
       // 优先使用OneBot WebSocket（支持插件触发）
-      if (oneBotService.isConnected) {
+      if (oneBotService.isConnectionReady()) {
         usedMethod = 'onebot'
         console.log('使用OneBot WebSocket发送消息（支持插件）')
 
@@ -428,7 +429,9 @@ router.post('/send', authenticate, async (req, res) => {
           }
         }
       } else {
-        throw new Error('OneBot未连接，请检查WebSocket连接')
+        const status = oneBotService.getConnectionStatus()
+        console.log('OneBot连接未就绪，状态:', status)
+        throw new Error(`OneBot未就绪，连接状态: ${JSON.stringify(status)}`)
       }
 
       // 如果没有通过流式回调发送，则一次性发送
