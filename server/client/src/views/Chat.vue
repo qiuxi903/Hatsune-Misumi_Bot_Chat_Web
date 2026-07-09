@@ -125,9 +125,15 @@
           </svg>
           个人资料
         </router-link>
+        <router-link v-if="isAdmin" to="/admin" class="sidebar-link admin-link">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          </svg>
+          管理后台
+        </router-link>
       </div>
       <div class="sidebar-footer-copyright">
-        <p>© 2026 丰川初音bot by <a href="https://github.com/qiuxi903/Hatsune-Misumi_Bot_Chat_Web" target="_blank" rel="noopener">邱息</a></p>
+        <p>© 2026 <a href="https://github.com/qiuxi903/Hatsune-Misumi_Bot_Chat_Web" target="_blank" rel="noopener">丰川初音bot</a> by <a href="https://www.hutaomu.cn" target="_blank" rel="noopener">邱息</a></p>
         <p class="license-info">Licensed under <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU AGPLv3</a></p>
         <p class="disclaimer">⚠️ AI生成可能有误，请勿当真</p>
         <p class="disclaimer">二创作品，与BanG Dream!原作无关</p>
@@ -149,25 +155,18 @@
               <line x1="3" y1="18" x2="21" y2="18"></line>
             </svg>
           </button>
-          <div class="chat-title">
+          <div class="chat-title" @click="renameSession" :title="currentSession ? '点击重命名' : ''">
             {{ currentSession?.title || '新对话' }}
+            <svg v-if="currentSession" class="edit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+            </svg>
           </div>
         </div>
         <div class="header-center">
           <span class="bot-brand">丰川初音</span>
         </div>
         <div class="header-right">
-          <button
-            v-if="currentSession"
-            class="action-btn"
-            @click="renameSession"
-            title="重命名"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-            </svg>
-          </button>
         </div>
       </header>
 
@@ -330,6 +329,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
 import socketService from '@/utils/socket'
+import { showToast, showConfirm, showPrompt } from '@/utils/dialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -358,6 +358,11 @@ const currentSession = computed(() => chatStore.currentSession)
 const messages = computed(() => chatStore.currentMessages)
 const sending = computed(() => chatStore.isSending)
 const streamingMessage = computed(() => chatStore.streamingMessage)
+
+// 管理员判断（邮箱为 anr1003@163.com）
+const isAdmin = computed(() => {
+  return userStore.user?.email === 'anr1003@163.com' || userStore.user?.is_admin === true
+})
 
 const filteredSessions = computed(() => {
   if (!searchQuery.value) return sessions.value
@@ -388,8 +393,10 @@ const switchSession = async (sessionId) => {
 }
 
 const deleteSession = async (sessionId) => {
-  if (confirm('确定要删除这个对话吗？')) {
+  const confirmed = await showConfirm('确定要删除这个对话吗？', '删除对话', 'danger')
+  if (confirmed) {
     await chatStore.deleteSession(sessionId)
+    showToast('对话已删除', 'success')
   }
 }
 
@@ -424,25 +431,34 @@ const selectAll = () => {
 
 const deleteSelected = async () => {
   if (selectedSessions.value.size === 0) return
-  if (confirm(`确定要删除选中的 ${selectedSessions.value.size} 个对话吗？`)) {
+  const confirmed = await showConfirm(
+    `确定要删除选中的 ${selectedSessions.value.size} 个对话吗？`,
+    '批量删除',
+    'danger'
+  )
+  if (confirmed) {
     for (const sessionId of selectedSessions.value) {
       await chatStore.deleteSession(sessionId)
     }
     exitSelectMode()
+    showToast(`已删除 ${selectedSessions.value.size} 个对话`, 'success')
   }
 }
 
 const renameSession = async () => {
   if (!currentSession.value) return
-  const newTitle = prompt('请输入新标题:', currentSession.value.title || '新对话')
-  if (newTitle && newTitle.trim()) {
-    await chatStore.renameSession(currentSession.value.id, newTitle.trim())
+  const newTitle = await showPrompt('重命名对话', currentSession.value.title || '新对话', '请输入新标题')
+  if (newTitle) {
+    await chatStore.renameSession(currentSession.value.id, newTitle)
+    showToast('对话已重命名', 'success')
   }
 }
 
-const clearChat = () => {
-  if (confirm('确定要清空当前对话吗？')) {
+const clearChat = async () => {
+  const confirmed = await showConfirm('确定要清空当前对话吗？', '清空对话', 'danger')
+  if (confirmed) {
     chatStore.clearMessages()
+    showToast('对话已清空', 'success')
   }
 }
 
@@ -963,8 +979,8 @@ onUnmounted(() => {
   margin-top: auto;
   border-top: 1px solid var(--border-color);
   text-align: center;
-  font-size: 0.6875rem;
-  color: var(--text-muted);
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
 }
 
 .sidebar-footer-copyright p {
@@ -973,33 +989,33 @@ onUnmounted(() => {
 }
 
 .sidebar-footer-copyright .disclaimer {
-  font-size: 0.625rem;
+  font-size: 0.75rem;
   color: #f59e0b;
   font-weight: 500;
   margin-top: 0.25rem;
 }
 
 .sidebar-footer-copyright a {
-  color: var(--text-secondary);
+  color: var(--text-primary);
   text-decoration: none;
   transition: color 0.15s ease;
 }
 
 .sidebar-footer-copyright a:hover {
-  color: var(--text-primary);
+  color: #0ea5e9;
 }
 
 .sidebar-footer-copyright .license-info {
   margin-top: 0.25rem;
-  font-size: 0.625rem;
+  font-size: 0.75rem;
 }
 
 .sidebar-footer-copyright .license-info a {
-  color: var(--text-muted);
+  color: var(--text-primary);
 }
 
 .sidebar-footer-copyright .license-info a:hover {
-  color: var(--text-primary);
+  color: #a855f7;
 }
 
 /* 主聊天区域 */
@@ -1072,6 +1088,26 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  transition: color 0.2s;
+}
+
+.chat-title:hover {
+  color: var(--text-primary);
+}
+
+.edit-icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+.chat-title:hover .edit-icon {
+  opacity: 1;
 }
 
 .chat-actions {

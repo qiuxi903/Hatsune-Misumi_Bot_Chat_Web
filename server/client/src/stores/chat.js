@@ -233,6 +233,18 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       streamingMessage.value = null
+
+      // 如果会话标题是"新对话"，用第一条消息更新标题
+      if (currentSession.value && currentSession.value.title === '新对话') {
+        const newTitle = content.length > 20 ? content.substring(0, 20) + '...' : content
+        currentSession.value = { ...currentSession.value, title: newTitle }
+        // 同步更新会话列表中的标题
+        const index = sessions.value.findIndex(s => s.id === currentSession.value.id)
+        if (index !== -1) {
+          sessions.value[index] = { ...sessions.value[index], title: newTitle }
+        }
+      }
+
       return { success: true }
     } catch (err) {
       console.error('发送消息错误:', err)

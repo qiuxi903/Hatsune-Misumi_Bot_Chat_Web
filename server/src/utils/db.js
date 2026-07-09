@@ -15,6 +15,7 @@ if (!fs.existsSync(dataDir)) {
 const usersFile = path.join(dataDir, 'users.json')
 const sessionsFile = path.join(dataDir, 'sessions.json')
 const messagesFile = path.join(dataDir, 'messages.json')
+const favoritesFile = path.join(dataDir, 'favorites.json')
 
 // 初始化数据文件
 const initDataFile = (filePath, defaultData = []) => {
@@ -26,6 +27,7 @@ const initDataFile = (filePath, defaultData = []) => {
 initDataFile(usersFile)
 initDataFile(sessionsFile)
 initDataFile(messagesFile)
+initDataFile(favoritesFile)
 
 // 读取数据
 const readData = (filePath) => {
@@ -109,7 +111,10 @@ const db = {
   sessions: {
     getAll(userId) {
       const sessions = readData(sessionsFile)
-      return sessions.filter(s => s.user_id === userId)
+      if (userId) {
+        return sessions.filter(s => s.user_id === userId)
+      }
+      return sessions // 没有userId时返回所有会话
     },
     getById(id) {
       const sessions = readData(sessionsFile)
@@ -156,7 +161,10 @@ const db = {
   messages: {
     getAll(sessionId) {
       const messages = readData(messagesFile)
-      return messages.filter(m => m.session_id === sessionId)
+      if (sessionId) {
+        return messages.filter(m => m.session_id === sessionId)
+      }
+      return messages // 没有sessionId时返回所有消息
     },
     getById(id) {
       const messages = readData(messagesFile)
@@ -178,6 +186,53 @@ const db = {
       const filteredMessages = messages.filter(m => m.id !== id)
       writeData(messagesFile, filteredMessages)
       return true
+    }
+  },
+
+  // 壁纸收藏操作
+  favorites: {
+    MAX_COUNT: 9,
+    getAll(userId) {
+      const favorites = readData(favoritesFile)
+      if (userId) {
+        return favorites.filter(f => f.user_id === userId)
+      }
+      return favorites // 没有userId时返回所有收藏
+    },
+    add(userId, imageData) {
+      const favorites = readData(favoritesFile)
+      // 检查用户收藏数量
+      const userFavorites = favorites.filter(f => f.user_id === userId)
+      if (userFavorites.length >= 9) {
+        return { error: '最多收藏9张壁纸' }
+      }
+      // 检查是否已收藏
+      if (userFavorites.some(f => f.image_data === imageData)) {
+        return { error: '已经收藏过这张壁纸' }
+      }
+      const newFavorite = {
+        id: generateId(),
+        user_id: userId,
+        image_data: imageData,
+        created_at: new Date().toISOString()
+      }
+      favorites.push(newFavorite)
+      writeData(favoritesFile, favorites)
+      return newFavorite
+    },
+    delete(userId, favoriteId) {
+      const favorites = readData(favoritesFile)
+      const favorite = favorites.find(f => f.id === favoriteId && f.user_id === userId)
+      if (!favorite) {
+        return { error: '收藏不存在' }
+      }
+      const filteredFavorites = favorites.filter(f => f.id !== favoriteId)
+      writeData(favoritesFile, filteredFavorites)
+      return { success: true }
+    },
+    getCount(userId) {
+      const favorites = readData(favoritesFile)
+      return favorites.filter(f => f.user_id === userId).length
     }
   }
 }

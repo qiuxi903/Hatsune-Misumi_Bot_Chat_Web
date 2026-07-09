@@ -356,6 +356,13 @@ router.post('/send', authenticate, async (req, res) => {
     const existingMessages = db.messages.getAll(session.id)
     const isNewSession = existingMessages.length === 0
 
+    // 如果会话标题是"新对话"，用第一条消息内容作为标题
+    if (session.title === '新对话' && content) {
+      const newTitle = content.length > 20 ? content.substring(0, 20) + '...' : content
+      session = db.sessions.update(session.id, { title: newTitle })
+      console.log(`会话标题已更新: "${newTitle}"`)
+    }
+
     // 保存用户消息
     db.messages.create({
       session_id: session.id,

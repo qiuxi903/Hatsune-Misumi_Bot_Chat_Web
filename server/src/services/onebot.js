@@ -16,8 +16,9 @@ class OneBotService extends EventEmitter {
     this.isConnected = false
     this.isApiConnected = false
     this.reconnectAttempts = 0
-    this.maxReconnectAttempts = 5
+    this.maxReconnectAttempts = Infinity // 无限重连
     this.reconnectDelay = 5000
+    this.maxReconnectDelay = 60000 // 最大重连延迟60秒
     this.messageQueue = []
     this.pendingRequests = Map ? new Map() : {}
     this.echoCounter = 0
@@ -35,6 +36,9 @@ class OneBotService extends EventEmitter {
     this.heartbeatTimeout = 30000 // 30秒心跳间隔
     this.lastHeartbeat = null
     this.heartbeatTimer = null
+
+    // 健康检查定时器
+    this.healthCheckInterval = null
 
     // 监听来自AstrBot的API调用（如send_msg）
     this.on('api_call', (message) => this.handleApiCall(message))
@@ -61,12 +65,15 @@ class OneBotService extends EventEmitter {
     ws.on('open', () => {
       console.log('[Event WebSocket] 连接成功')
       this.isConnected = true
-      this.reconnectAttempts = 0
+      this.reconnectAttempts = 0 // 重置重连计数
       this.lastHeartbeat = Date.now()
       this.emit('connected')
 
       // 启动心跳检测
       this.startHeartbeat()
+
+      // 启动定期健康检查
+      this.startHealthCheck()
 
       // 发送队列中的消息
       console.log(`[Event WebSocket] 发送队列中的 ${this.messageQueue.length} 条消息`)
@@ -113,16 +120,14 @@ class OneBotService extends EventEmitter {
       }
       this.pendingWebMessages.clear()
 
-      // 自动重连
-      if (this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts++
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1)
-        console.log(`[Event WebSocket] 尝试重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})，${delay}ms后...`)
-        setTimeout(() => this.connect(wsUrl, token), delay)
-      } else {
-        console.log('[Event WebSocket] 达到最大重连次数')
-        this.emit('reconnect_failed')
-      }
+      // 自动重连（指数退避，无次数限制）
+      this.reconnectAttempts++
+      const delay = Math.min(
+        this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1),
+        this.maxReconnectDelay
+      )
+      console.log(`[Event WebSocket] ${Math.round(delay / 1000)}秒后重连...`)
+      setTimeout(() => this.connect(wsUrl, token), delay)
     })
 
     ws.on('error', (error) => {
@@ -180,10 +185,10 @@ class OneBotService extends EventEmitter {
       console.log(`[API WebSocket] 连接已关闭: code=${code}`)
       this.isApiConnected = false
 
-      // 自动重连API连接
+      // 自动重连API连接（使用递增延迟）
       if (this._url) {
-        const delay = 3000
-        console.log(`[API WebSocket] ${delay}ms后重连...`)
+        const delay = Math.min(3000 * Math.pow(1.5, this.reconnectAttempts), 30000)
+        console.log(`[API WebSocket] ${Math.round(delay / 1000)}秒后重连...`)
         setTimeout(() => this._connectApi(this._url, this._token), delay)
       }
     })
@@ -282,6 +287,51 @@ class OneBotService extends EventEmitter {
     }
   }
 
+  // 启动定期健康检查（每60秒检查一次连接状态）
+  startHealthCheck() {
+    this.stopHealthCheck()
+    this.healthCheckInterval = setInterval(() => {
+      this._performHealthCheck()
+    }, 60000)
+  }
+
+  // 停止健康检查
+  stopHealthCheck() {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval)
+      this.healthCheckInterval = null
+    }
+  }
+
+  // 执行健康检查
+  _performHealthCheck() {
+    const now = Date.now()
+
+    // 检查Event连接
+    if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.log('[健康检查] Event连接异常，触发重连')
+      this.reconnect()
+      return
+    }
+
+    // 检查心跳超时
+    if (this.lastHeartbeat && now - this.lastHeartbeat > this.heartbeatTimeout * 3) {
+      console.log('[健康检查] 心跳超时，触发重连')
+      this.reconnect()
+      return
+    }
+
+    // 检查API连接
+    if (!this.isApiConnected || !this.wsApi || this.wsApi.readyState !== WebSocket.OPEN) {
+      console.log('[健康检查] API连接异常，尝试重连API')
+      if (this._url) {
+        this._connectApi(this._url, this._token)
+      }
+    }
+
+    console.log('[健康检查] 连接正常')
+  }
+
   // 重新连接
   reconnect() {
     if (this._url) {
@@ -316,6 +366,7 @@ class OneBotService extends EventEmitter {
   disconnect() {
     console.log('[disconnect] 断开OneBot连接')
     this.stopHeartbeat()
+    this.stopHealthCheck()
 
     if (this.ws) {
       this.ws.close()
@@ -1393,101 +1444,6 @@ class OneBotService extends EventEmitter {
     return this.isConnected &&
            this.ws &&
            this.ws.readyState === WebSocket.OPEN
-  }
-
-  // 处理HTTP API调用
-  async handleHttpApiCall(action, params, echo) {
-    console.log(`[handleHttpApiCall] 处理HTTP API调用: ${action}`)
-
-    // 查询API处理
-    const queryResult = this._handleQueryApi(action, params)
-    if (queryResult !== undefined) {
-      return queryResult
-    }
-
-    // 处理send_msg和send_private_msg
-    if (action === 'send_msg' || action === 'send_private_msg') {
-      let userId = params.user_id !== undefined ? Number(params.user_id) : null
-      let responseContent = ''
-
-      // 提取消息内容
-      if (typeof params.message === 'string') {
-        responseContent = params.message
-      } else if (Array.isArray(params.message)) {
-        responseContent = await this.extractMessageText(params.message)
-      }
-
-      // 如果没有user_id，尝试找到最近的待处理消息
-      if (!userId && this.pendingWebMessages.size > 0) {
-        const entries = [...this.pendingWebMessages.entries()]
-        entries.sort((a, b) => (b[1].sentAt || 0) - (a[1].sentAt || 0))
-        userId = entries[0][0]
-      }
-
-      console.log(`[HTTP send_private_msg] 用户 ${userId}: ${responseContent.substring(0, 100)}`)
-
-      // 查找对应的待处理Web消息
-      const pending = userId ? this.pendingWebMessages.get(userId) : null
-
-      if (pending) {
-        // 收集响应消息
-        pending.messages.push(responseContent)
-        console.log(`[HTTP send_private_msg] 已推送消息到pending，当前共 ${pending.messages.length} 条消息`)
-
-        // 立即通过回调通知前端
-        if (pending.onMessage) {
-          pending.onMessage({
-            content: responseContent,
-            messageIndex: pending.messages.length - 1,
-            totalMessages: pending.messages.length
-          })
-        }
-
-        // 智能消息收集
-        clearTimeout(pending.timer)
-        const elapsed = Date.now() - (pending.sentAt || Date.now())
-        const remaining = Math.max(3000 - elapsed, 500)
-
-        pending.timer = setTimeout(() => {
-          if (this.pendingWebMessages.has(userId)) {
-            this.pendingWebMessages.delete(userId)
-            const messages = [...pending.messages]
-            console.log(`[HTTP send_private_msg] 收集完成，共 ${messages.length} 条消息`)
-            pending.resolve(messages)
-          }
-        }, remaining)
-      } else {
-        console.log(`[HTTP send_private_msg] 未找到pending消息: userId=${userId}`)
-      }
-
-      return null
-    }
-
-    // 处理friend_poke
-    if (action === 'friend_poke') {
-      const userId = params.user_id
-      console.log(`[HTTP friend_poke] 用户 ${userId}`)
-
-      const pending = this.pendingWebMessages.get(userId)
-      if (pending) {
-        pending.messages.push('[戳一戳]')
-
-        clearTimeout(pending.timer)
-        pending.timer = setTimeout(() => {
-          if (this.pendingWebMessages.has(userId)) {
-            this.pendingWebMessages.delete(userId)
-            const messages = [...pending.messages]
-            pending.resolve(messages)
-          }
-        }, 30000)
-      }
-
-      return null
-    }
-
-    // 未知API
-    console.log(`[handleHttpApiCall] 未知API: ${action}`)
-    return null
   }
 }
 

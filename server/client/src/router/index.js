@@ -39,6 +39,35 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/admin',
+    name: 'Admin',
+    component: () => import('@/views/Admin.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true }
+  },
+  {
+    path: '/admin/users',
+    name: 'AdminUsers',
+    component: () => import('@/views/Admin.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true }
+  },
+  {
+    path: '/admin/sessions',
+    name: 'AdminSessions',
+    component: () => import('@/views/Admin.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true }
+  },
+  {
+    path: '/admin/messages',
+    name: 'AdminMessages',
+    component: () => import('@/views/Admin.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true }
+  },
+  {
+    path: '/403',
+    name: 'Forbidden',
+    component: () => import('@/views/Forbidden.vue')
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
     component: () => import('@/views/NotFound.vue')
@@ -75,6 +104,15 @@ router.beforeEach(async (to, from, next) => {
   if (to.meta.guestOnly && isAuthenticated) {
     next({ name: 'Chat' })
     return
+  }
+
+  // 需要管理员权限的页面
+  if (to.meta.requiresAdmin) {
+    const isAdmin = userStore.user?.email === 'anr1003@163.com' || userStore.user?.is_admin === true
+    if (!isAdmin) {
+      next({ name: 'Forbidden' })
+      return
+    }
   }
 
   next()

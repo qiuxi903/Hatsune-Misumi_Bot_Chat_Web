@@ -10,7 +10,7 @@
       </div>
     </div>
     <div class="page-copyright">
-      <p>© 2026 丰川初音bot by <a href="https://github.com/qiuxi903/Hatsune-Misumi_Bot_Chat_Web" target="_blank" rel="noopener">邱息</a></p>
+      <p>© 2026 <a href="https://github.com/qiuxi903/Hatsune-Misumi_Bot_Chat_Web" target="_blank" rel="noopener">丰川初音bot</a> by <a href="https://www.hutaomu.cn" target="_blank" rel="noopener">邱息</a></p>
       <p class="license-info">Licensed under <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU AGPLv3</a></p>
     </div>
   </div>
@@ -65,31 +65,31 @@
   left: 0;
   right: 0;
   text-align: center;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  font-size: 0.875rem;
+  color: var(--text-secondary);
 }
 
 .page-copyright a {
-  color: var(--text-secondary);
+  color: var(--text-primary);
   text-decoration: none;
   transition: color 0.15s ease;
 }
 
 .page-copyright a:hover {
-  color: var(--text-primary);
+  color: #0ea5e9;
 }
 
 .page-copyright .license-info {
   margin-top: 0.25rem;
-  font-size: 0.625rem;
+  font-size: 0.8125rem;
 }
 
 .page-copyright .license-info a {
-  color: var(--text-muted);
+  color: var(--text-primary);
 }
 
 .page-copyright .license-info a:hover {
-  color: var(--text-primary);
+  color: #a855f7;
 }
 
 @media (max-width: 480px) {

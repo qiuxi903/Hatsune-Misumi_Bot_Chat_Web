@@ -12,6 +12,8 @@ import authRoutes from './routes/auth.js'
 import userRoutes from './routes/user.js'
 import chatRoutes from './routes/chat.js'
 import pluginRoutes from './routes/plugins.js'
+import wallpapersRoutes from './routes/wallpapers.js'
+import adminRoutes from './routes/admin.js'
 
 // 导入服务
 import oneBotService from './services/onebot.js'
@@ -31,7 +33,6 @@ const io = new Server(server, {
 })
 
 const PORT = process.env.PORT || 5000
-let CONNECTION_MODE = process.env.CONNECTION_MODE || 'http' // http 或 websocket
 
 // 中间件
 const corsOrigin = process.env.CORS_ORIGIN || '*'
@@ -63,6 +64,8 @@ app.use('/api/auth', authRoutes)
 app.use('/api/user', userRoutes)
 app.use('/api/chat', chatRoutes)
 app.use('/api/plugins', pluginRoutes)
+app.use('/api/wallpapers', wallpapersRoutes)
+app.use('/api/admin', adminRoutes)
 
 // 健康检查
 app.get('/api/health', (req, res) => {
@@ -70,57 +73,8 @@ app.get('/api/health', (req, res) => {
     success: true,
     message: '丰川初音bot 服务运行正常',
     timestamp: new Date().toISOString(),
-    connectionMode: CONNECTION_MODE,
+    connectionMode: 'websocket',
     onebot: oneBotService.getConnectionStatus()
-  })
-})
-
-// API测试端点
-app.post('/api/test', (req, res) => {
-  console.log('[测试] 收到测试请求:', req.body)
-  res.json({
-    success: true,
-    message: 'API测试成功',
-    received: req.body,
-    timestamp: new Date().toISOString()
-  })
-})
-
-// 获取连接状态
-app.get('/api/connection/status', (req, res) => {
-  res.json({
-    success: true,
-    mode: CONNECTION_MODE,
-    onebot: oneBotService.getConnectionStatus()
-  })
-})
-
-// 切换连接模式
-app.post('/api/connection/mode', (req, res) => {
-  const { mode } = req.body
-  if (mode !== 'http' && mode !== 'websocket') {
-    return res.status(400).json({
-      success: false,
-      message: '无效的连接模式，可选值：http 或 websocket'
-    })
-  }
-
-  // 更新环境变量和本地变量（仅在当前会话生效）
-  process.env.CONNECTION_MODE = mode
-  CONNECTION_MODE = mode
-
-  // 如果切换到websocket模式，启动OneBot服务
-  if (mode === 'websocket') {
-    startOneBot()
-  } else {
-    // 切换到http模式，断开OneBot连接
-    oneBotService.disconnect()
-  }
-
-  res.json({
-    success: true,
-    message: `已切换到 ${mode} 模式`,
-    mode
   })
 })
 
@@ -130,73 +84,6 @@ app.get('/api/onebot/status', (req, res) => {
     success: true,
     status: oneBotService.getConnectionStatus()
   })
-})
-
-// 获取OneBot健康状态
-app.get('/api/onebot/health', async (req, res) => {
-  const health = await oneBotService.checkConnectionHealth()
-  res.json({
-    success: true,
-    health
-  })
-})
-
-// OneBot v11 HTTP API 端点
-// aiocqhttp 可能使用 HTTP POST 来调用 API
-app.post('/api/onebot/:action', async (req, res) => {
-  const action = req.params.action
-  const params = req.body
-  const echo = params.echo || `http_${Date.now()}`
-
-  console.log(`[HTTP API] 收到API调用: ${action}`, JSON.stringify(params).substring(0, 200))
-
-  try {
-    // 处理API调用
-    const result = await oneBotService.handleHttpApiCall(action, params, echo)
-    res.json({
-      status: 'ok',
-      retcode: 0,
-      data: result,
-      echo
-    })
-  } catch (error) {
-    console.error(`[HTTP API] 处理失败:`, error.message)
-    res.json({
-      status: 'failed',
-      retcode: 100,
-      msg: error.message,
-      echo
-    })
-  }
-})
-
-// OneBot v11 标准 API 端点 (直接调用)
-app.post('/', async (req, res) => {
-  const { action, params, echo } = req.body
-
-  if (!action) {
-    return res.json({ status: 'failed', retcode: 100, msg: 'missing action' })
-  }
-
-  console.log(`[OneBot API] 收到API调用: ${action}`, echo ? `(echo: ${echo})` : '')
-
-  try {
-    const result = await oneBotService.handleHttpApiCall(action, params || {}, echo)
-    res.json({
-      status: 'ok',
-      retcode: 0,
-      data: result,
-      echo
-    })
-  } catch (error) {
-    console.error(`[OneBot API] 处理失败:`, error.message)
-    res.json({
-      status: 'failed',
-      retcode: 100,
-      msg: error.message,
-      echo
-    })
-  }
 })
 
 // Socket.IO连接处理
@@ -225,35 +112,17 @@ io.on('connection', (socket) => {
           timestamp: new Date().toISOString()
         })
       } else {
-        // 根据连接模式选择发送方式
-        if (CONNECTION_MODE === 'websocket' && oneBotService.isConnected) {
-          // 通过OneBot发送消息
+        // 通过OneBot发送消息
+        if (oneBotService.isConnected) {
           await oneBotService.sendPrivateMessage(
             data.userId || 0,
             content
           )
-        } else if (CONNECTION_MODE === 'http' && astrBotService.isConnected) {
-          // 通过AstrBot HTTP API发送消息
-          const result = await astrBotService.chat(
-            data.username || 'web_user',
-            content,
-            { enableStreaming: true }
-          )
-
-          if (result.success && result.stream) {
-            // 处理流式响应
-            result.stream.on('data', (chunk) => {
-              const text = chunk.toString()
-              socket.emit('chat:stream', {
-                sessionId,
-                content: text
-              })
-            })
-
-            result.stream.on('end', () => {
-              socket.emit('chat:done', { sessionId })
-            })
-          }
+        } else {
+          socket.emit('chat:error', {
+            sessionId,
+            message: 'OneBot未连接，请检查连接'
+          })
         }
       }
     } catch (error) {
@@ -325,11 +194,11 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🎵 丰川初音bot 服务已启动`)
   console.log(`📡 服务地址: http://0.0.0.0:${PORT}`)
   console.log(`🔌 API地址: http://0.0.0.0:${PORT}/api`)
-  console.log(`🔗 连接模式: ${CONNECTION_MODE}`)
+  console.log(`🔗 连接模式: WebSocket (OneBot v11)`)
   console.log(`💚 健康检查: http://0.0.0.0:${PORT}/api/health`)
   console.log(`📁 前端路径: ${clientDistPath}\n`)
 
-  // 启动OneBot服务（用于插件支持）
+  // 启动OneBot服务
   startOneBot()
 })
 

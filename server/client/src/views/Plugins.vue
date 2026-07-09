@@ -18,32 +18,12 @@
       <p class="page-description">管理您的 astrbot 插件，在聊天中调用插件功能</p>
     </div>
 
-    <!-- 连接模式选择 -->
-    <div class="connection-mode glass">
-      <h3 class="mode-title">连接模式</h3>
-      <div class="mode-options">
-        <button
-          class="mode-btn"
-          :class="{ active: connectionMode === 'http' }"
-          @click="switchMode('http')"
-        >
-          <div class="mode-icon">🌐</div>
-          <div class="mode-info">
-            <div class="mode-name">HTTP API</div>
-            <div class="mode-desc">通过AstrBot HTTP API连接（推荐）</div>
-          </div>
-        </button>
-        <button
-          class="mode-btn"
-          :class="{ active: connectionMode === 'websocket' }"
-          @click="switchMode('websocket')"
-        >
-          <div class="mode-icon">🔌</div>
-          <div class="mode-info">
-            <div class="mode-name">WebSocket</div>
-            <div class="mode-desc">通过OneBot v11反向WebSocket连接</div>
-          </div>
-        </button>
+    <!-- 连接状态 -->
+    <div class="connection-info glass">
+      <div class="mode-icon">🔌</div>
+      <div class="mode-info">
+        <div class="mode-name">OneBot v11 反向WebSocket</div>
+        <div class="mode-desc">通过WebSocket连接到AstrBot</div>
       </div>
     </div>
 
@@ -206,7 +186,7 @@
     </div>
 
     <div class="page-copyright">
-      <p>© 2026 丰川初音bot by <a href="https://github.com/qiuxi903/Hatsune-Misumi_Bot_Chat_Web" target="_blank" rel="noopener">邱息</a></p>
+      <p>© 2026 <a href="https://github.com/qiuxi903/Hatsune-Misumi_Bot_Chat_Web" target="_blank" rel="noopener">丰川初音bot</a> by <a href="https://www.hutaomu.cn" target="_blank" rel="noopener">邱息</a></p>
       <p class="license-info">Licensed under <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU AGPLv3</a></p>
     </div>
   </div>
@@ -216,6 +196,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/utils/api'
+import { showToast } from '@/utils/dialog'
 
 const router = useRouter()
 
@@ -325,9 +306,10 @@ const togglePlugin = async (plugin) => {
       enabled: !plugin.enabled
     })
     plugin.enabled = !plugin.enabled
+    showToast(`插件已${plugin.enabled ? '启用' : '禁用'}`, 'success')
   } catch (err) {
     console.error('切换插件状态失败:', err)
-    alert('操作失败，请重试')
+    showToast('操作失败，请重试', 'error')
   }
 }
 
@@ -358,11 +340,11 @@ const saveConfig = async () => {
     await api.put(`/api/plugins/${configPlugin.value.name}/config`, {
       config: pluginConfig.value
     })
-    alert('配置保存成功')
+    showToast('配置保存成功', 'success')
     closeConfig()
   } catch (err) {
     console.error('保存插件配置失败:', err)
-    alert('保存失败，请重试')
+    showToast('保存失败，请重试', 'error')
   } finally {
     savingConfig.value = false
   }
@@ -378,7 +360,7 @@ const switchMode = async (mode) => {
     }
   } catch (err) {
     console.error('切换连接模式失败:', err)
-    alert('切换失败，请重试')
+    showToast('切换失败，请重试', 'error')
   }
 }
 
@@ -940,31 +922,31 @@ onMounted(() => {
 .page-copyright {
   margin-top: 2rem;
   text-align: center;
-  font-size: 0.75rem;
-  color: var(--text-muted);
+  font-size: 0.875rem;
+  color: var(--text-secondary);
 }
 
 .page-copyright a {
-  color: var(--text-secondary);
+  color: var(--text-primary);
   text-decoration: none;
   transition: color 0.15s ease;
 }
 
 .page-copyright a:hover {
-  color: var(--text-primary);
+  color: #0ea5e9;
 }
 
 .page-copyright .license-info {
   margin-top: 0.25rem;
-  font-size: 0.625rem;
+  font-size: 0.8125rem;
 }
 
 .page-copyright .license-info a {
-  color: var(--text-muted);
+  color: var(--text-primary);
 }
 
 .page-copyright .license-info a:hover {
-  color: var(--text-primary);
+  color: #a855f7;
 }
 
 /* 响应式设计 */
